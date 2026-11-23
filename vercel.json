@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "api/send.js": { "maxDuration": 30 },
+    "api/verify.js": { "maxDuration": 20 },
+    "api/logs.js": { "maxDuration": 15 }
+  }
+}
