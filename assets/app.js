@@ -147,7 +147,7 @@ const TEMPLATES = {
       name: 'Gentle nudge',
       subject: 'Following up on campaign ideas for {{brand}}',
       body: `<p>Hi {{first_name}},</p>
-<p>Just following up on my note from last week about a campaign for {{brand}}.</p>
+<p>Just following up on my note from a few days ago about a campaign for {{brand}}.</p>
 <p>If it helps, I can send a one-page plan so you can see what it would look like before we talk.</p>
 <p>Best regards,</p>`,
     },
@@ -182,6 +182,7 @@ const EMAIL_RE = /^[^\s@<>()",;]+@[^\s@<>()",;]+\.[^\s@<>()",;]{2,}$/;
 // ═══════════════════════════════════════════════════════════════
 const DEFAULT_SETTINGS = {
   name: '', email: '', pass: '', acct: 'gmail', signature: '',
+  fuTpl: { 1: 'b:followup:0', 2: 'b:followup:1' },
   pace: 'normal', unsubscribe: true, dupDays: 30, replyTo: '', dnc: [],
 };
 const S = {
@@ -221,8 +222,10 @@ document.addEventListener('DOMContentLoaded', () => {
   S.settings = { ...DEFAULT_SETTINGS, ...store.get('vl_settings', {}) };
   S.local = store.get('vl_events', []);
   S.myTemplates = store.get('vl_templates', []);
-  S.replies = store.get('vl_replies', {});
-  S.lastReplyCheck = store.get('vl_reply_check', 0);
+  S.replies = store.get('vl_replies2', {});
+  S.lastReplyCheck = store.get('vl_reply_check2', 0);
+  S.replyOverride = store.get('vl_reply_override', {});
+  store.del('vl_replies'); store.del('vl_reply_check');
   try { document.execCommand('defaultParagraphSeparator', false, 'p'); } catch {}
 
   bindNav();
@@ -1372,12 +1375,16 @@ function bindProgress() {
 function mergeReplies(map) {
   let changed = false;
   Object.entries(map || {}).forEach(([k, v]) => { if (!S.replies[k]) { S.replies[k] = v; changed = true; } });
-  if (changed) store.set('vl_replies', S.replies);
+  if (changed) store.set('vl_replies2', S.replies);
 }
-function hasReplied(from, to) { return !!S.replies[`${from}|${to}`]; }
+function hasReplied(from, to) {
+  const k = `${from}|${to}`, o = (S.replyOverride || {})[k];
+  return o === 'yes' ? true : o === 'no' ? false : !!S.replies[k];
+}
+function replyTime(from, to) { const k = `${from}|${to}`; return (S.replyOverride || {})[k] === 'yes' && !S.replies[k] ? 0 : S.replies[k] || 0; }
 function typeLabel(c) { return (TYPES[c.type] || 'Other') + (c.fu ? ` · follow-up ${c.fu}` : ''); }
 function sentPill(e) {
-  return S.replies[`${e.from}|${e.to}`] ? '<span class="pill pill-ok">Replied</span>' : '<span class="pill pill-muted">Sent</span>';
+  return hasReplied(e.from, e.to) ? '<span class="pill pill-ok">Replied</span>' : '<span class="pill pill-muted">Sent</span>';
 }
 
 // Your campaigns from the last 60 days, with who replied and what's due.
@@ -1391,7 +1398,7 @@ function myThreads() {
     let t = m.get(id);
     if (!e.fu) {
       if (!t) { t = { root: id, type: e.type, first: e.t, last: e.t, stage: 0, subject: e.subject, brands: new Map(), contacts: new Map() }; m.set(id, t); }
-      if (!t.contacts.has(e.to)) t.contacts.set(e.to, { email: e.to, name: e.toName || '', brand: e.brand || '', subject: e.subject, mid: e.mid || '', last: e.t });
+      if (!t.contacts.has(e.to)) t.contacts.set(e.to, { email: e.to, name: e.toName || '', brand: e.brand || '', subject: e.subject, mid: e.mid || '', sentAt: e.t, last: e.t });
       if (e.brand) t.brands.set(e.brand.toLowerCase(), e.brand);
       t.last = Math.max(t.last, e.t);
     } else if (t) {
@@ -1407,7 +1414,7 @@ function myThreads() {
     const pending = contactList.filter(c => !hasReplied(me, c.email));
     const days = (now - t.last) / 864e5;
     const status = !pending.length ? 'replied' : t.stage >= FU_MAX ? 'done' : days >= FU_DUE_DAYS ? 'due' : 'wait';
-    return { ...t, contactList, replied, pending, days, status };
+    return { ...t, contactList, replied, pending, days, status, threadable: contactList.some(c => c.mid) };
   }).sort((a, b) => rank[a.status] - rank[b.status] || b.last - a.last);
 }
 
@@ -1419,6 +1426,7 @@ function updateFuBadge() {
 function renderFollowups() {
   if ($('page-followups').hidden) return;
   $('replyStatus').textContent = S.lastReplyCheck ? `Replies checked ${timeAgo(S.lastReplyCheck)}` : '';
+  renderFuMessages();
   const body = $('fuBody');
   if (!S.settings.email || !S.settings.pass) { body.innerHTML = `<tr class="table-empty"><td colspan="7">Connect your Gmail in Settings to see your follow-ups.</td></tr>`; return; }
   const list = myThreads();
@@ -1439,10 +1447,10 @@ function renderFollowups() {
       ? `<button class="btn btn-primary btn-sm" data-fu="${esc(t.root)}" type="button">Follow up (${t.pending.length})</button>`
       : t.status === 'wait' ? `<button class="btn btn-outline btn-sm" data-fu="${esc(t.root)}" type="button">Follow up early</button>` : '';
     return `<tr>
-      <td><span class="td-strong">${esc(brand)}</span><span class="td-sub td-clip" title="${esc(t.subject)}">${esc(t.subject || '')}</span></td>
+      <td><button type="button" class="row-link" data-thread="${esc(t.root)}"><span class="td-strong">${esc(brand)}</span><span class="td-sub td-clip" title="${esc(t.subject)}">${esc(t.subject || '')}</span>${t.threadable ? '' : '<span class="td-sub td-note">Sent before thread support</span>'}</button></td>
       <td class="td-when" data-label="First sent">${esc(fmtDate(t.first))}<span class="td-sub">${esc(timeAgo(t.first))}</span></td>
       <td class="t-num" data-label="Contacts">${n}</td>
-      <td class="t-num" data-label="Replied"><span class="reply-bar">${r}<span class="meter"><span style="width:${n ? r / n * 100 : 0}%"></span></span></span></td>
+      <td class="t-num" data-label="Replied"><span class="reply-bar"><button type="button" class="link-num" data-thread="${esc(t.root)}" title="See who replied">${r} of ${n}</button><span class="meter"><span style="width:${n ? r / n * 100 : 0}%"></span></span></span></td>
       <td data-label="Follow-ups"><span class="dots">${dots}<em>${t.stage} of ${FU_MAX}</em></span></td>
       <td>${pill}</td>
       <td class="t-right">${action}</td>
@@ -1450,17 +1458,20 @@ function renderFollowups() {
   }).join('');
 }
 
-async function checkReplies(contacts, since) {
+// contacts: [{ email, since }], since = exact time the pitch went to that person.
+// Only a message from them that arrived after that moment counts as a reply.
+async function checkReplies(contacts) {
   const me = S.settings.email.toLowerCase();
-  const todo = [...new Set(contacts)].filter(c => !hasReplied(me, c));
+  const seen = new Set();
+  const todo = contacts.filter(c => c.email !== me && c.since && !S.replies[`${me}|${c.email}`] && !seen.has(c.email) && seen.add(c.email));
   let found = 0;
   for (let i = 0; i < todo.length; i += 150) {
-    const { ok, data } = await api('/api/replies', { method: 'POST', body: { auth: { user: me, pass: S.settings.pass }, contacts: todo.slice(i, i + 150), since } });
+    const { ok, data } = await api('/api/replies', { method: 'POST', body: { auth: { user: me, pass: S.settings.pass }, contacts: todo.slice(i, i + 150) } });
     if (!ok) throw new Error(data.error || 'Could not check replies.');
-    (data.replied || []).forEach(to => { const k = `${me}|${to}`; if (!S.replies[k]) { S.replies[k] = Date.now(); found++; } });
+    (data.replied || []).forEach(r => { const k = `${me}|${r.email}`; if (!S.replies[k]) { S.replies[k] = r.at || Date.now(); found++; } });
   }
-  store.set('vl_replies', S.replies);
-  S.lastReplyCheck = Date.now(); store.set('vl_reply_check', S.lastReplyCheck);
+  store.set('vl_replies2', S.replies);
+  S.lastReplyCheck = Date.now(); store.set('vl_reply_check2', S.lastReplyCheck);
   return found;
 }
 
@@ -1471,13 +1482,13 @@ async function checkAllReplies(silent) {
     return;
   }
   const threads = myThreads().filter(t => t.pending.length && Date.now() - t.first < 45 * 864e5);
-  const contacts = threads.flatMap(t => t.pending.map(c => c.email));
+  const contacts = threads.flatMap(t => t.pending.map(c => ({ email: c.email, since: c.sentAt })));
   if (!contacts.length) { if (!silent) toast('info', 'Nothing to check', 'No recent campaigns are waiting on replies.'); return; }
   replyChecking = true;
   const btn = $('checkRepliesBtn'); btn.disabled = true;
   $('replyStatus').textContent = 'Checking your Gmail…';
   try {
-    const found = await checkReplies(contacts, Math.min(...threads.map(t => t.first)));
+    const found = await checkReplies(contacts);
     if (!silent) toast(found ? 'ok' : 'info', found ? `${found} new ${found === 1 ? 'reply' : 'replies'} found` : 'No new replies yet', found ? 'They’re left out of follow-ups automatically.' : `Checked ${contacts.length} contacts.`);
   } catch (e) {
     if (!silent && !e.access) toast('bad', 'Couldn’t check replies', e.message);
@@ -1498,7 +1509,7 @@ async function startFollowUp(root) {
   if (t.stage >= FU_MAX) return toast('info', 'Two follow-ups already sent', 'It’s best to move on from this one.');
   toast('info', 'Checking your Gmail for replies…');
   let replyErr = false;
-  try { await checkReplies(t.contactList.map(c => c.email), t.first); } catch (e) { replyErr = !e.access; }
+  try { await checkReplies(t.contactList.map(c => ({ email: c.email, since: c.sentAt }))); } catch (e) { replyErr = !e.access; }
   t = myThreads().find(x => x.root === root);
   if (!t.pending.length) { toast('ok', 'Everyone has replied', 'No follow-up needed.'); renderFollowups(); updateFuBadge(); return; }
 
@@ -1506,24 +1517,88 @@ async function startFollowUp(root) {
   saveDraft();
   const prev = { draft: store.get('vl_draft', null), files: S.files.slice() };
   const stage = t.stage + 1;
-  const tplIdx = stage >= 2 ? 1 : 0;
-  const tpl = TEMPLATES.followup[tplIdx];
+  const tplId = (S.settings.fuTpl || {})[stage] || ('b:followup:' + (stage >= 2 ? 1 : 0));
+  const tpl = findTemplate(tplId) || TEMPLATES.followup[stage >= 2 ? 1 : 0];
   S.fu = {
-    root, stage, type: t.type || 'custom', threaded: true, title: t.subject, first: t.first,
+    root, stage, type: t.type || 'custom', threaded: t.threadable, threadable: t.threadable, title: t.subject, first: t.first,
     contacts: new Map(t.pending.map(c => [c.email, c])), repliedSkipped: t.replied.length, altSubject: tpl.subject, prev,
   };
   $('recipientsInput').value = ['email,name,brand'].concat(t.pending.map(c => [c.email, c.name, c.brand].map(csvSoft).join(','))).join('\n');
   S.files = [];
   $('brand').value = t.brands.size === 1 ? [...t.brands.values()][0] : '';
   $('editor').innerHTML = sanitize(tpl.body);
-  S.activeTpl = 'b:followup:' + tplIdx;
-  $('subject').value = reSubject(t.pending[0].subject);
+  S.activeTpl = findTemplate(tplId) ? tplId : null;
+  $('subject').value = t.threadable ? reSubject(t.pending[0].subject) : tpl.subject;
   S.excluded.clear();
   applyFuUI();
   parseAndRender(true); renderAttachments(); renderTemplates(); renderTips(); updateSubjectCount(); updateReadiness();
   go('compose');
   if (replyErr) toast('bad', 'Couldn’t check for replies', 'Review the list and remove anyone who already answered.');
   else toast('info', `Follow-up ${stage} is ready`, `${t.pending.length} ${t.pending.length === 1 ? 'person hasn’t' : 'people haven’t'} replied${t.replied.length ? `, and ${t.replied.length} who did ${t.replied.length === 1 ? 'is' : 'are'} left out` : ''}. Edit the message, then send.`);
+}
+
+function fuTemplates() {
+  return TEMPLATES.followup.map((t, i) => ({ id: 'b:followup:' + i, name: t.name, t }))
+    .concat(S.myTemplates.filter(t => t.type === 'followup').map(t => ({ id: t.id, name: t.name + ' (yours)', t })));
+}
+function renderFuMessages() {
+  const opts = fuTemplates();
+  const chosen = S.settings.fuTpl || {};
+  const when = { 1: '3 days after your first email', 2: '3 days after follow-up 1' };
+  $('fuMsgs').innerHTML = [1, 2].map(stage => {
+    let id = chosen[stage];
+    if (!opts.some(o => o.id === id)) id = 'b:followup:' + (stage - 1);
+    const t = findTemplate(id) || TEMPLATES.followup[stage - 1];
+    const body = sanitize(t.body).replace(/\{\{\s*([a-z0-9_ ]+?)\s*(\|[^}]*)?\}\}/gi, m => `<span class="tok">${esc(m)}</span>`);
+    return `<div class="fu-msg">
+      <div class="fu-msg-head">
+        <div><strong>Follow-up ${stage}</strong><span class="muted">${when[stage]}</span></div>
+        <span class="select select-sm"><select class="input" data-fu-tpl="${stage}" aria-label="Message for follow-up ${stage}">
+          ${opts.map(o => `<option value="${esc(o.id)}"${o.id === id ? ' selected' : ''}>${esc(o.name)}</option>`).join('')}</select></span>
+      </div>
+      <div class="fu-msg-subj"><span class="muted">Subject</span> Re: <em>the subject of your first email</em></div>
+      <div class="fu-msg-body mail-body">${body}<p class="muted">+ your signature</p></div>
+    </div>`;
+  }).join('');
+}
+
+function openThread(root) {
+  const t = myThreads().find(x => x.root === root); if (!t) return;
+  S.openThread = root;
+  const me = S.settings.email.toLowerCase();
+  const b = [...t.brands.values()];
+  $('cmTitle').textContent = b.length ? b[0] + (b.length > 1 ? ` +${b.length - 1}` : '') : 'Campaign';
+  $('cmBody').innerHTML = `
+    <div class="cm-meta">
+      <div>First sent<strong>${esc(fmtDate(t.first))}</strong></div>
+      <div>Contacts<strong>${t.contactList.length}</strong></div>
+      <div>Replied<strong>${t.replied.length}</strong></div>
+      <div>Follow-ups<strong>${t.stage} of ${FU_MAX}</strong></div>
+    </div>
+    <p class="muted" style="margin-bottom:14px;font-size:.86rem">A reply means a message from that person reached your Gmail after your pitch went to them. Click <em>Check for replies</em> to look again. If one is wrong, correct it here.</p>
+    <table class="table"><thead><tr><th>Contact</th><th>Brand</th><th>Status</th><th></th></tr></thead><tbody>
+    ${t.contactList.map(c => {
+      const k = `${me}|${c.email}`;
+      const yes = hasReplied(me, c.email);
+      const at = replyTime(me, c.email);
+      const manual = (S.replyOverride || {})[k];
+      const status = yes
+        ? `<span class="pill pill-ok">Replied${at ? ' ' + esc(fmtDate(at)) : ''}</span>${manual === 'yes' ? '<span class="td-sub">marked by you</span>' : ''}`
+        : `<span class="pill pill-muted">No reply yet</span>${manual === 'no' && S.replies[k] ? '<span class="td-sub">marked by you</span>' : ''}`;
+      return `<tr>
+        <td>${c.name ? `<span class="td-strong">${esc(c.name)}</span><span class="td-sub">${esc(c.email)}</span>` : esc(c.email)}</td>
+        <td>${esc(c.brand || '—')}</td>
+        <td>${status}</td>
+        <td class="t-right"><button type="button" class="btn btn-quiet btn-sm" data-ov="${esc(k)}" data-v="${yes ? 'no' : 'yes'}">${yes ? 'Not a reply' : 'Mark as replied'}</button></td>
+      </tr>`;
+    }).join('')}
+    </tbody></table>
+    ${t.threadable ? '' : '<p class="muted" style="margin-top:14px;font-size:.84rem">This campaign was sent before thread support was added, so its follow-ups go out as a new email instead of a reply.</p>'}`;
+  const can = t.stage < FU_MAX && t.pending.length;
+  $('cmFollow').hidden = !can;
+  $('cmFollow').textContent = can ? `Follow up (${t.pending.length})` : 'Write a follow-up';
+  $('cmFollow').onclick = () => { closeModal('campModal'); startFollowUp(root); };
+  if ($('campModal').hidden) openModal('campModal');
 }
 
 function applyFuUI() {
@@ -1541,8 +1616,9 @@ function applyFuUI() {
   if (on) {
     $('fuStep').textContent = `Follow-up ${S.fu.stage} of ${FU_MAX}`;
     $('fuTitle').textContent = `“${S.fu.title}”`;
-    $('fuMeta').textContent = `First sent ${timeAgo(S.fu.first)}`;
+    $('fuMeta').textContent = `First sent ${timeAgo(S.fu.first)}` + (S.fu.threadable ? '' : ' · sent before thread support was added, so this goes as a new email');
     $('fuThreaded').checked = S.fu.threaded;
+    $('fuThreaded').disabled = !S.fu.threadable;
   }
 }
 
@@ -1572,7 +1648,22 @@ function bindTeam() {
   $('refreshBtn').onclick = async () => { $('refreshBtn').disabled = true; await loadTeam(true); $('refreshBtn').disabled = false; toast('info', 'Up to date'); };
   $('campSearch').addEventListener('input', renderCampaigns);
   $('checkRepliesBtn').onclick = () => checkAllReplies(false);
-  $('fuBody').addEventListener('click', e => { const b = e.target.closest('[data-fu]'); if (b) startFollowUp(b.dataset.fu); });
+  $('fuBody').addEventListener('click', e => {
+    const b = e.target.closest('[data-fu]'); if (b) return startFollowUp(b.dataset.fu);
+    const th = e.target.closest('[data-thread]'); if (th) openThread(th.dataset.thread);
+  });
+  $('fuMsgs').addEventListener('change', e => {
+    const sel = e.target.closest('[data-fu-tpl]'); if (!sel) return;
+    S.settings.fuTpl = { ...(S.settings.fuTpl || {}), [sel.dataset.fuTpl]: sel.value };
+    store.set('vl_settings', S.settings); renderFuMessages();
+  });
+  $('cmBody').addEventListener('click', e => {
+    const b = e.target.closest('[data-ov]'); if (!b) return;
+    const k = b.dataset.ov;
+    S.replyOverride[k] = b.dataset.v; store.set('vl_reply_override', S.replyOverride);
+    if (S.openThread) openThread(S.openThread);
+    renderFollowups(); updateFuBadge(); renderTeam(); renderLog();
+  });
   $('exportBtn').onclick = exportCsv;
   $('campBody').addEventListener('click', e => { const tr = e.target.closest('[data-cid]'); if (tr) openCampaign(tr.dataset.cid); });
   $('campBody').addEventListener('keydown', e => { if (e.key === 'Enter') { const tr = e.target.closest('[data-cid]'); if (tr) openCampaign(tr.dataset.cid); } });
@@ -1617,7 +1708,7 @@ function renderTeam() {
   $('kBrands').textContent = brandCount.length.toLocaleString('en-IN');
   $('kBrandsFoot').textContent = brandCount.length ? `Most pitched: ${brandCount[0].label}` : '';
   const pairs = new Set(ok.map(e => e.from + '|' + e.to));
-  const repliedPairs = [...pairs].filter(k => S.replies[k]).length;
+  const repliedPairs = [...pairs].filter(k => { const [f, t] = k.split('|'); return hasReplied(f, t); }).length;
   $('kRate').textContent = pairs.size ? Math.round(repliedPairs / pairs.size * 100) + '%' : '—';
   $('kRateFoot').textContent = pairs.size ? `${repliedPairs} of ${pairs.size} contacts replied${fail.length ? ` · ${fail.length} failed` : ''}` : '';
 
@@ -1719,7 +1810,7 @@ function renderPeople() {
       <td class="t-num td-strong">${p.period.toLocaleString('en-IN')}</td>
       <td class="t-num">${p.camps.size}</td>
       <td class="t-num">${p.brands.size}</td>
-      <td class="t-num">${[...p.pairs].filter(to => S.replies[p.from + '|' + to]).length}</td>
+      <td class="t-num">${[...p.pairs].filter(to => hasReplied(p.from, to)).length}</td>
       <td class="t-num">${p.failed ? `<span style="color:var(--bad)">${p.failed}</span>` : '0'}</td>
       <td><div class="limit"><div class="meter${pct >= 90 ? ' bad' : pct >= 70 ? ' warn' : ''}"><span style="width:${pct}%"></span></div><span>${p.today} / ${lim}</span></div></td>
       <td class="td-when">${p.last ? esc(timeAgo(p.last)) : '—'}</td>
@@ -1760,6 +1851,8 @@ function renderCampaigns() {
 }
 
 function openCampaign(cid) {
+  S.openThread = null;
+  $('cmFollow').textContent = 'Write a follow-up';
   const c = campaigns().find(x => x.cid === cid); if (!c) return;
   $('cmTitle').textContent = brandLabel(c) === '—' ? 'Campaign' : brandLabel(c);
   const rows = c.rows.slice().sort((a, b) => a.t - b.t);

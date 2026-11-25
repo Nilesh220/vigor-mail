@@ -86,15 +86,17 @@ Each teammate enters the code once, and their browser remembers it.
 
 ## Follow-ups
 
-Open **Follow-ups** in the menu. It lists your campaigns from the last 60 days:
+Nothing is ever sent automatically. A person always clicks **Follow up**, checks the message and sends it.
 
-1. Click **Check for replies**. The dashboard looks in your Gmail (read-only, using the same App Password) to see who has written back.
-2. When a campaign shows **Due now** (3 days after the last email), click **Follow up**.
-3. The dashboard loads only the people who haven’t replied, with a short follow-up template. Edit it if you like, then send as usual.
-4. Each follow-up goes out as a **reply in the same email thread**, so the contact sees your original pitch underneath.
-5. After **two follow-ups**, the campaign is marked done.
+1. Open **Follow-ups** in the menu. It lists your campaigns from the last 60 days.
+2. Click **Check for replies**. The dashboard looks in your Gmail (read-only, using the same App Password). A contact only counts as *replied* if a message from them arrived **after** your pitch went to them, so emails from before the campaign don't count.
+3. Click the **Replied** number (e.g. “1 of 3”) to see exactly who replied. If something is wrong, click **Mark as replied** or **Not a reply**.
+4. **What gets sent** shows the message for follow-up 1 and follow-up 2. Pick a different one from the dropdown, or write your own: click Follow up, edit the text, then click **Save as template**, and it appears in the dropdown.
+5. When a campaign shows **Due now** (3 days after the last email), click **Follow up**. Only people who haven't replied are loaded. Edit if you like, then send.
+6. Each follow-up goes out as a **reply in the same email thread**: the subject becomes “Re: …”, and in the contact's Gmail it sits under your original pitch. Campaigns sent before 25 Nov 2026 (before thread support) get their follow-up as a new email instead.
+7. After **two follow-ups**, the campaign is marked done.
 
-The yellow number next to **Follow-ups** in the menu tells you how many campaigns are due.
+The yellow number next to **Follow-ups** in the menu shows how many campaigns are due.
 
 ## Limits to know
 

@@ -26,7 +26,7 @@ async function redis(commands) {
 }
 
 const EVENTS_KEY = 'vl:events';
-const REPLIES_KEY = 'vl:replies';
+const REPLIES_KEY = 'vl:replies2'; // v2: exact-time matching (v1 marks were unreliable and are ignored)
 const MAX_EVENTS = 25000;
 
 async function logEvent(evt) {

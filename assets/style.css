@@ -547,6 +547,7 @@ textarea.input[readonly] { background: #F8F9FB; color: var(--text-2); }
   .fu-banner { grid-template-columns: 1fr; }
   .fu-cancel { grid-column: 1; grid-row: auto; justify-self: start; }
   .fu-how { grid-template-columns: 1fr; }
+  .fu-msgs { grid-template-columns: 1fr; }
   .fu-table thead { display: none; }
   .fu-table, .fu-table tbody { display: block; }
   .fu-table tr { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 22px; padding: 18px; border-bottom: 1px solid var(--line-2); }
@@ -560,6 +561,23 @@ textarea.input[readonly] { background: #F8F9FB; color: var(--text-2); }
   .fu-table .td-clip { max-width: none; white-space: normal; }
   .fu-how > div + div { border-left: 0; border-top: 1px solid var(--line-2); }
 }
+
+.row-link { display: block; text-align: left; width: 100%; }
+.row-link:hover .td-strong { text-decoration: underline; text-underline-offset: 3px; }
+.td-note { color: var(--warn); }
+.link-num { font-variant-numeric: tabular-nums; color: var(--ink); font-weight: 600; text-decoration: underline; text-decoration-color: #B9C3D4; text-underline-offset: 3px; white-space: nowrap; }
+.link-num:hover { text-decoration-color: var(--ink); }
+.fu-msgs { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.fu-msg { border: 1px solid var(--line-2); border-radius: var(--r-md); padding: 16px 18px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.fu-msg-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+.fu-msg-head strong { display: block; color: var(--ink-2); font-weight: 600; }
+.fu-msg-head .muted { font-size: .8rem; }
+.fu-msg-head .select { min-width: 190px; }
+.fu-msg-subj { font-size: .84rem; color: var(--text-2); padding-bottom: 10px; border-bottom: 1px dashed var(--line); }
+.fu-msg-subj .muted { margin-right: 6px; }
+.fu-msg-body { font-size: 13.5px; }
+.fu-msg-body p:last-child { margin-bottom: 0; }
+.fu-msg-body .tok { background: var(--navy-soft); color: var(--ink); border-radius: 3px; padding: 0 2px; font-family: inherit; }
 
 /* ───────── Responsive ───────── */
 @media (max-width: 1180px) {
