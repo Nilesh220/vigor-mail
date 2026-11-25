@@ -168,7 +168,13 @@ const SPAM_WORDS = ['free', 'guaranteed', 'guarantee', '100%', 'act now', 'urgen
   'congratulations', 'exclusive deal', 'special promotion', 'once in a lifetime', 'no obligation', 'amazing offer', 'dear friend'];
 const SHORTENERS = /\b(bit\.ly|tinyurl\.com|goo\.gl|t\.co|ow\.ly|is\.gd|cutt\.ly|rebrand\.ly|shorturl\.at)\b/i;
 const PACES = { gentle: [10, 20], normal: [5, 10], fast: [2, 4] };
-const MAX_ATTACH = 3 * 1024 * 1024;
+const INLINE_LIMIT = 3 * 1024 * 1024;   // without team storage
+const STORED_LIMIT = 15 * 1024 * 1024;  // with team storage (Gmail's own cap is 25 MB after encoding)
+const CHUNK_BYTES = 2.4 * 1024 * 1024;
+const BLOCKED_EXT = new Set(['ade','adp','apk','appx','bat','cab','chm','cmd','com','cpl','dll','dmg','exe','hta','ins','iso','isp','jar','js','jse','lib','lnk','mde','msc','msi','msp','mst','nsh','pif','ps1','scr','sct','shb','sys','vb','vbe','vbs','vxd','wsc','wsf','wsh']);
+const FU_DUE_DAYS = 3, FU_MAX = 2;
+function storageOn() { return S.team.storage === true; }
+function attachLimit() { return storageOn() ? STORED_LIMIT : INLINE_LIMIT; }
 const EMAIL_RE = /^[^\s@<>()",;]+@[^\s@<>()",;]+\.[^\s@<>()",;]{2,}$/;
 
 // ═══════════════════════════════════════════════════════════════
@@ -195,6 +201,10 @@ const S = {
   pvIndex: 0,
   lastFocus: 'editor',
   savedRange: null,
+  replies: {},         // 'from|to' -> when a reply was found
+  lastReplyCheck: 0,
+  fu: null,            // follow-up mode
+  uploads: new Map(),  // file -> stored attachment id
 };
 
 const $ = id => document.getElementById(id);
@@ -211,6 +221,8 @@ document.addEventListener('DOMContentLoaded', () => {
   S.settings = { ...DEFAULT_SETTINGS, ...store.get('vl_settings', {}) };
   S.local = store.get('vl_events', []);
   S.myTemplates = store.get('vl_templates', []);
+  S.replies = store.get('vl_replies', {});
+  S.lastReplyCheck = store.get('vl_reply_check', 0);
   try { document.execCommand('defaultParagraphSeparator', false, 'p'); } catch {}
 
   bindNav();
@@ -229,6 +241,7 @@ document.addEventListener('DOMContentLoaded', () => {
   updateReadiness();
   updateQuota();
 
+  updateFuBadge();
   route();
   window.addEventListener('hashchange', route);
   checkServer();
@@ -237,7 +250,7 @@ document.addEventListener('DOMContentLoaded', () => {
 // ═══════════════════════════════════════════════════════════════
 //  Navigation
 // ═══════════════════════════════════════════════════════════════
-const PAGE_TITLES = { compose: 'New campaign', team: 'Team activity', log: 'Sent log', settings: 'Settings' };
+const PAGE_TITLES = { compose: 'New campaign', followups: 'Follow-ups', team: 'Team activity', log: 'Sent log', settings: 'Settings' };
 
 function bindNav() {
   $('menuBtn').onclick = () => { $('nav').classList.add('open'); $('navScrim').classList.add('open'); };
@@ -259,6 +272,7 @@ function route() {
   closeNav();
   window.scrollTo(0, 0);
   if (p === 'team') { renderTeam(); loadTeam(); }
+  if (p === 'followups') { renderFollowups(); loadTeam(); autoCheckReplies(); }
   if (p === 'log') { S.logLimit = 200; renderLog(); loadTeam(); }
 }
 
@@ -284,7 +298,7 @@ async function checkServer() {
     S.team.storage = !!data.storage;
     S.team.accessRequired = !!data.accessRequired;
     if (data.accessRequired && !store.get('vl_access', '')) openAccess();
-    renderStorageStatus();
+    renderStorageStatus(); renderAttachments(); updateReadiness();
     if (data.storage && (!data.accessRequired || store.get('vl_access', ''))) loadTeam();
   } catch {
     S.team.storage = null;
@@ -300,14 +314,14 @@ async function loadTeam(force) {
     try {
       const { ok, data } = await api('/api/logs');
       if (data.storage === false) { S.team.storage = false; }
-      else if (ok) { S.team.events = data.events || []; S.team.loaded = true; S.team.capped = !!data.capped; S.team.error = ''; S.team.storage = true; }
+      else if (ok) { S.team.events = data.events || []; S.team.loaded = true; S.team.capped = !!data.capped; S.team.error = ''; S.team.storage = true; mergeReplies(data.replies); }
       else { S.team.error = data.error || 'Could not load team history.'; }
     } catch (e) {
       if (!e.access) S.team.error = 'Could not reach the server.';
     }
     teamLoading = null;
     renderStorageStatus();
-    renderTeam(); renderLog(); updateQuota(); parseAndRender(true);
+    renderTeam(); renderLog(); updateQuota(); parseAndRender(true); renderAttachments(); renderFollowups(); updateFuBadge();
   })();
   return teamLoading;
 }
@@ -415,6 +429,16 @@ function bindCompose() {
   $('lnAdd').onclick = insertLink;
   $('lnUrl').addEventListener('keydown', e => { if (e.key === 'Enter') insertLink(); });
 
+  $('fuCancel').onclick = () => { exitFollowUp(); toast('info', 'Follow-up cancelled', 'Your previous draft is back.'); };
+  $('fuThreaded').onchange = e => {
+    if (!S.fu) return;
+    S.fu.threaded = e.target.checked;
+    const first = S.fu.contacts.values().next().value;
+    if (S.fu.threaded) { S.fu.altSubject = $('subject').value; $('subject').value = first ? reSubject(first.subject) : $('subject').value; }
+    else $('subject').value = S.fu.altSubject || TEMPLATES.followup[0].subject;
+    applyFuUI(); updateSubjectCount(); updateReadiness();
+  };
+
   window.addEventListener('beforeunload', e => { if (S.job && S.job.running) { e.preventDefault(); e.returnValue = ''; } });
 }
 
@@ -424,6 +448,7 @@ function bindCompose() {
 let draftTimer;
 function saveDraftSoon() { clearTimeout(draftTimer); draftTimer = setTimeout(saveDraft, 400); }
 function saveDraft() {
+  if (S.fu) return;
   store.set('vl_draft', {
     brand: $('brand').value, type: $('ctype').value, subject: $('subject').value,
     body: $('editor').innerHTML, recipients: $('recipientsInput').value, useSig: $('useSignature').checked,
@@ -454,7 +479,7 @@ function startOver() {
 //  Templates
 // ═══════════════════════════════════════════════════════════════
 function renderTemplates() {
-  const type = $('ctype').value;
+  const type = S.fu ? 'followup' : $('ctype').value;
   const built = (TEMPLATES[type] || []).map((t, i) => ({ ...t, id: 'b:' + type + ':' + i }));
   const mine = S.myTemplates.filter(t => t.type === type);
   const wrap = $('templateChips');
@@ -496,12 +521,13 @@ function saveMyTemplate() {
   const name = $('tplName').value.trim();
   if (!name) { $('tplName').focus(); return; }
   const t = { id: 'm:' + Date.now().toString(36), type: $('ctype').value, name, subject: $('subject').value, body: sanitize($('editor').innerHTML) };
+  if (S.fu) t.type = 'followup';
   S.myTemplates.push(t); store.set('vl_templates', S.myTemplates);
   S.activeTpl = t.id; renderTemplates(); closeModal('tplModal');
   toast('ok', 'Template saved', `Find it under ${TYPES[t.type]}.`);
 }
 function renderTips() {
-  const type = $('ctype').value;
+  const type = S.fu ? 'followup' : $('ctype').value;
   $('tipsTitle').textContent = (type === 'custom' ? 'Pitch' : TYPES[type]) + ' tips';
   $('tips').innerHTML = (TIPS[type] || TIPS.custom).map(t => `<li>${esc(t)}</li>`).join('');
 }
@@ -711,7 +737,7 @@ function parseAndRender(keepExcluded) {
   S.recipients = p.list.filter(r => !S.excluded.has(r.email)).map(r => ({
     ...r,
     dnc: dnc.has(r.email),
-    recent: recent.get(r.email) || null,
+    recent: (S.fu && S.fu.contacts.has(r.email)) ? null : (recent.get(r.email) || null),
   }));
   renderRecipients();
   updateSendInfo();
@@ -809,17 +835,27 @@ function signatureHtml() {
   const lines = esc(sig).split('\n').join('<br>');
   return `<div style="margin-top:18px;color:#5f6368;">${lines}</div>`;
 }
+function reSubject(s) { return 'Re: ' + String(s || '').replace(/^\s*((re|fwd?|fw)\s*:\s*)+/i, ''); }
+function fuContact(r) { return S.fu && S.fu.threaded ? S.fu.contacts.get(r.email) : null; }
 function buildMessage(r, missing) {
   const body = fill(sanitize($('editor').innerHTML), r, true, missing) + signatureHtml();
-  const subject = fill($('subject').value.trim(), r, false, missing).replace(/\s+/g, ' ').trim();
-  return { subject, html: body };
+  const c = fuContact(r);
+  const subject = c && c.subject ? reSubject(c.subject) : fill($('subject').value.trim(), r, false, missing).replace(/\s+/g, ' ').trim();
+  return { subject, html: body, inReplyTo: c && c.mid ? c.mid : '' };
 }
 
 // ═══════════════════════════════════════════════════════════════
 //  Attachments
 // ═══════════════════════════════════════════════════════════════
 function addFiles(list) {
-  [...list].forEach(f => { if (!S.files.some(x => x.name === f.name && x.size === f.size)) S.files.push(f); });
+  const blocked = [];
+  [...list].forEach(f => {
+    const ext = (f.name.split('.').pop() || '').toLowerCase();
+    if (BLOCKED_EXT.has(ext)) { blocked.push(f.name); return; }
+    if (!f.size) return;
+    if (!S.files.some(x => x.name === f.name && x.size === f.size)) S.files.push(f);
+  });
+  if (blocked.length) toast('bad', 'Gmail blocks this file type', `${blocked.join(', ')} can’t be sent by email. Share it as a Google Drive link instead.`);
   renderAttachments(); updateReadiness();
 }
 function totalAttach() { return S.files.reduce((s, f) => s + f.size, 0); }
@@ -831,13 +867,18 @@ function renderAttachments() {
   }).join('');
   const total = totalAttach();
   $('attMeter').hidden = !S.files.length;
-  const pct = Math.min(100, total / MAX_ATTACH * 100);
+  const lim = attachLimit();
+  const pct = Math.min(100, total / lim * 100);
   $('attMeterBar').style.width = pct + '%';
-  $('attMeterBar').parentElement.className = 'meter' + (total > MAX_ATTACH ? ' bad' : pct > 80 ? ' warn' : '');
-  $('attMeter').classList.toggle('over', total > MAX_ATTACH);
-  $('attMeterText').textContent = total > MAX_ATTACH
-    ? `${fmtSize(total)}, over the 3 MB limit. Share big decks as a Drive link instead.`
-    : `${fmtSize(total)} of 3 MB`;
+  $('attMeterBar').parentElement.className = 'meter' + (total > lim ? ' bad' : pct > 80 ? ' warn' : '');
+  $('attMeter').classList.toggle('over', total > lim);
+  const n = S.files.length;
+  $('attMeterText').textContent = total > lim
+    ? (storageOn() ? `${fmtSize(total)}, over the 15 MB limit. Share the biggest file as a Drive link.` : `${fmtSize(total)}, over 3 MB. Turn on team storage (setup guide, step 4) to send up to 15 MB.`)
+    : `${n} file${n === 1 ? '' : 's'} · ${fmtSize(total)} of ${storageOn() ? '15' : '3'} MB`;
+  $('attNote').textContent = storageOn()
+    ? 'Add as many files as you need: decks, rate cards, case studies. Up to 15 MB in total, sent with every email.'
+    : 'Add as many files as you need: decks, rate cards, case studies. Up to 3 MB in total (15 MB once team storage is on).';
   updateSendInfo();
 }
 function fileToBase64(file) {
@@ -847,6 +888,53 @@ function fileToBase64(file) {
     r.onerror = reject;
     r.readAsDataURL(file);
   });
+}
+
+function readAsBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(',')[1] || '');
+    r.onerror = reject;
+    r.readAsDataURL(blob);
+  });
+}
+async function fileHash(file) {
+  const buf = await file.arrayBuffer();
+  const h = await crypto.subtle.digest('SHA-256', buf);
+  return [...new Uint8Array(h)].map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 40);
+}
+// With team storage: upload each file once (in pieces) and send a reference.
+// Without it: send the file inside every request (3 MB limit).
+async function prepareAttachments(onProgress, force) {
+  if (!S.files.length) return [];
+  if (!storageOn()) return Promise.all(S.files.map(fileToBase64));
+  const totalBytes = totalAttach();
+  let doneBytes = 0;
+  const out = [];
+  for (const f of S.files) {
+    const key = f.name + '|' + f.size + '|' + f.lastModified;
+    const cached = S.uploads.get(key);
+    if (cached && !force && Date.now() - cached.at < 24 * 3600e3) { out.push({ ref: cached.id, name: f.name, type: f.type }); doneBytes += f.size; continue; }
+    const id = await fileHash(f);
+    const check = await api('/api/upload?id=' + id);
+    if (!(check.ok && check.data.exists) || force) {
+      const total = Math.max(1, Math.ceil(f.size / CHUNK_BYTES));
+      for (let i = 0; i < total; i++) {
+        const part = f.slice(i * CHUNK_BYTES, Math.min(f.size, (i + 1) * CHUNK_BYTES));
+        const data = await readAsBase64(part);
+        const res = await api('/api/upload', { method: 'POST', body: { id, index: i, total, data } });
+        if (!res.ok) throw new Error(res.data.error || 'Upload failed.');
+        doneBytes += part.size;
+        if (onProgress) onProgress(Math.min(99, Math.round(doneBytes / totalBytes * 100)));
+      }
+      const c = await api('/api/upload', { method: 'POST', body: { id, total, commit: true, name: f.name, type: f.type, size: f.size } });
+      if (!c.ok) throw new Error(c.data.error || 'Upload failed.');
+    } else doneBytes += f.size;
+    S.uploads.set(key, { id, at: Date.now() });
+    out.push({ ref: id, name: f.name, type: f.type || 'application/octet-stream' });
+    if (onProgress) onProgress(Math.min(99, Math.round(doneBytes / totalBytes * 100)));
+  }
+  return out;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -866,11 +954,12 @@ function readinessChecks() {
   const text = $('editor').innerText || '';
   const all = (subject + ' ' + text).toLowerCase();
   const out = [];
-  const empty = !subject && !text.trim();
+  const empty = !subject && !text.trim() && !S.fu;
   if (empty) return [];
 
   // subject
-  if (!subject) out.push(['bad', 'Add a subject line']);
+  if (S.fu && S.fu.threaded) out.push(['ok', 'Replies in the original email thread']);
+  else if (!subject) out.push(['bad', 'Add a subject line']);
   else if (subject.length > 80) out.push(['warn', 'Subject is long', 'Aim for under 60 characters so it isn’t cut off on phones.']);
   else if (subject.length > 60) out.push(['warn', 'Subject is a little long', 'Under 60 characters reads best on phones.']);
   else out.push(['ok', 'Subject length is good']);
@@ -895,7 +984,8 @@ function readinessChecks() {
 
   // length
   const words = text.trim().split(/\s+/).filter(Boolean).length;
-  if (words < 40) out.push(['warn', 'Very short email', 'A few more lines of context helps.']);
+  if (S.fu) { if (words > 120) out.push(['warn', 'Long for a follow-up', 'Two or three lines works best.']); else out.push(['ok', 'Short and easy to answer']); }
+  else if (words < 40) out.push(['warn', 'Very short email', 'A few more lines of context helps.']);
   else if (words > 250) out.push(['warn', `Long email (${words} words)`, 'Under 200 words gets more replies.']);
   else out.push(['ok', `Good length (${words} words)`]);
 
@@ -905,8 +995,8 @@ function readinessChecks() {
   else if (links > 3) out.push(['warn', `${links} links`, 'Keep it to 1–2 links in a first email.']);
 
   // attachments
-  if (totalAttach() > MAX_ATTACH) out.push(['bad', 'Attachments over 3 MB', 'Use a Google Drive link instead.']);
-  else if (S.files.length) out.push(['ok', `${S.files.length} attachment${S.files.length > 1 ? 's' : ''} under 3 MB`]);
+  if (totalAttach() > attachLimit()) out.push(['bad', `Attachments over ${storageOn() ? 15 : 3} MB`, storageOn() ? 'Share the largest file as a Google Drive link.' : 'Turn on team storage for up to 15 MB, or use a Drive link.']);
+  else if (S.files.length) out.push(['ok', `${S.files.length} attachment${S.files.length > 1 ? 's' : ''} (${fmtSize(totalAttach())})`]);
 
   // signature
   if (!$('useSignature').checked || !(S.settings.signature || '').trim()) out.push(['warn', 'No signature', 'Add your name, role and phone number in Settings.']);
@@ -1009,9 +1099,9 @@ function openPreview(i) {
 function preflight() {
   const s = S.settings;
   if (!s.email || !s.pass) { toast('bad', 'Connect your Gmail first', 'Add your Gmail and App Password in Settings.'); go('settings'); return false; }
-  if (!$('subject').value.trim()) { toast('bad', 'Add a subject line'); $('subject').focus(); return false; }
+  if (!(S.fu && S.fu.threaded) && !$('subject').value.trim()) { toast('bad', 'Add a subject line'); $('subject').focus(); return false; }
   if (isEditorEmpty()) { toast('bad', 'Your email is empty', 'Write a message or pick a template.'); $('editor').focus(); return false; }
-  if (totalAttach() > MAX_ATTACH) { toast('bad', 'Attachments are over 3 MB', 'Remove some, or share them as a Google Drive link.'); return false; }
+  if (totalAttach() > attachLimit()) { toast('bad', `Attachments are over ${storageOn() ? 15 : 3} MB`, 'Remove some, or share them as a Google Drive link.'); return false; }
   return true;
 }
 
@@ -1035,12 +1125,16 @@ function reviewAndSend() {
     items.push(`<div class="cf-item warn">${ICONS.warn}<div><strong>${recent.length} ${recent.length === 1 ? 'contact was' : 'contacts were'} pitched in the last ${S.settings.dupDays} days.</strong><br>${esc(names)}${recent.length > 3 ? '…' : ''}
       <label><input type="checkbox" id="cfSkipRecent" checked /> Skip them this time</label></div></div>`);
   }
+  if (S.fu) {
+    const ago = S.lastReplyCheck ? timeAgo(S.lastReplyCheck) : '';
+    items.push(`<div class="cf-item">${ICONS.info}<div><strong>Follow-up ${S.fu.stage} of ${FU_MAX}.</strong> ${S.fu.threaded ? 'Each email goes out as a reply in the original thread.' : 'Sent as a new email with your subject line.'}${S.fu.repliedSkipped ? ` ${S.fu.repliedSkipped} ${S.fu.repliedSkipped === 1 ? 'person who replied was' : 'people who replied were'} left out.` : ''}${ago ? ` Replies last checked ${ago}.` : ''}</div></div>`);
+  }
   if (dnc.length) items.push(`<div class="cf-item">${ICONS.info}<div>${dnc.length} on your do-not-contact list will be skipped.</div></div>`);
   if (ready.length > left) items.push(`<div class="cf-item bad">${ICONS.bad}<div><strong>This is more than Gmail allows today.</strong> You have about ${left} left out of ${lim}, so Gmail will stop accepting emails partway through. Split this list across days.</div></div>`);
   checks.forEach(([lvl, t, d]) => items.push(`<div class="cf-item ${lvl}">${ICONS[lvl]}<div><strong>${esc(t)}</strong>${d ? `<br>${esc(d)}` : ''}</div></div>`));
   if (!items.length) items.push(`<div class="cf-item">${ICONS.ok}<div>Everything looks good.</div></div>`);
 
-  const subjSample = fill($('subject').value.trim(), ready[0], false);
+  const subjSample = buildMessage(ready[0]).subject;
   $('cfBody').innerHTML = `
     <dl class="cf-summary">
       <dt>From</dt><dd>${esc(S.settings.name || '')} &lt;${esc(S.settings.email)}&gt;</dd>
@@ -1075,9 +1169,10 @@ async function sendTest() {
   if (!preflight()) return;
   const r = S.recipients.find(x => !x.dnc) || { email: S.settings.email, name: S.settings.name, brand: '', company: '', fields: {} };
   const { subject, html } = buildMessage(r);
-  const btn = $('testBtn'); btn.disabled = true; btn.textContent = 'Sending test…';
+  const btn = $('testBtn'); btn.disabled = true; btn.textContent = S.files.length && storageOn() ? 'Uploading files…' : 'Sending test…';
   try {
-    const attachments = await Promise.all(S.files.map(fileToBase64));
+    const attachments = await prepareAttachments(p => { btn.textContent = `Uploading files ${p}%`; });
+    btn.textContent = 'Sending test…';
     const { ok, data } = await api('/api/send', {
       method: 'POST',
       body: {
@@ -1090,30 +1185,37 @@ async function sendTest() {
     if (ok) toast('ok', 'Test sent to your inbox', `Personalised as ${r.name || r.email}. Check how it looks.`);
     else toast('bad', 'Test didn’t send', data.error || 'Check your Gmail settings.');
   } catch (e) {
-    if (!e.access) toast('bad', 'Couldn’t reach the server', 'Check your internet connection and try again.');
+    if (!e.access) toast('bad', 'Test didn’t send', e.message && !/fetch/i.test(e.message) ? e.message : 'Check your internet connection and try again.');
   } finally {
     btn.disabled = false; btn.textContent = 'Send test to me';
   }
 }
 
 async function startJob(queue) {
-  let attachments = [];
-  try { attachments = await Promise.all(S.files.map(fileToBase64)); }
-  catch { return toast('bad', 'Couldn’t read the attachments', 'Remove them and add them again.'); }
-
   const job = {
     cid: 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
     items: queue.map(r => ({ r, status: 'wait', err: '' })),
-    attachments,
-    type: $('ctype').value,
+    attachments: [],
+    type: S.fu ? S.fu.type : $('ctype').value,
+    root: S.fu ? S.fu.root : '', fu: S.fu ? S.fu.stage : 0,
     paused: false, stopped: false, running: true, fatal: '',
   };
   S.job = job;
-  $('pgTitle').textContent = 'Sending…';
+  $('pgTitle').textContent = S.fu ? 'Sending follow-up…' : 'Sending…';
   $('pgStop').hidden = false; $('pgPause').hidden = false; $('pgPause').textContent = 'Pause';
   $('pgRetry').hidden = true; $('pgDone').hidden = true;
   renderProgress(true);
   openModal('progressModal');
+  if (S.files.length) {
+    $('pgNote').textContent = storageOn() ? 'Uploading attachments…' : 'Preparing attachments…';
+    try {
+      job.attachments = await prepareAttachments(p => { $('pgNote').textContent = `Uploading attachments… ${p}%`; $('pgBar').style.width = (p * 0.08) + '%'; });
+    } catch (e) {
+      job.fatal = 'Couldn’t upload the attachments: ' + (e.message || 'please try again.');
+      job.items.forEach(x => { x.status = 'skip'; x.err = 'Not sent'; });
+      job.running = false; finishJob(job); return;
+    }
+  }
   await runJob(job, job.items);
 }
 
@@ -1154,24 +1256,31 @@ async function runJob(job, items) {
 }
 
 async function sendOne(job, r) {
-  const { subject, html } = buildMessage(r);
+  const { subject, html, inReplyTo } = buildMessage(r);
   const brand = valueFor('brand', r);
   const evt = {
     t: Date.now(), cid: job.cid, from: S.settings.email.toLowerCase(), fromName: S.settings.name,
     to: r.email, toName: r.name, brand, type: job.type, subject, att: job.attachments.length, acct: S.settings.acct, ok: false,
   };
+  if (job.root) { evt.root = job.root; evt.fu = job.fu; }
   try {
-    const { ok, data } = await api('/api/send', {
+    const post = () => api('/api/send', {
       method: 'POST',
       body: {
         auth: { user: S.settings.email, pass: S.settings.pass, name: S.settings.name },
         to: { email: r.email, name: r.name },
-        subject, html, attachments: job.attachments,
+        subject, html, attachments: job.attachments, inReplyTo,
         unsubscribe: !!S.settings.unsubscribe, replyTo: S.settings.replyTo,
-        meta: { cid: job.cid, brand, type: job.type, acct: S.settings.acct },
+        meta: { cid: job.cid, brand, type: job.type, acct: S.settings.acct, root: job.root, fu: job.fu },
       },
     });
-    if (ok && data.ok) { recordLocal({ ...evt, ok: true }); return { ok: true }; }
+    let { ok, data } = await post();
+    if (!ok && data.code === 'ATT_MISSING' && !job.reuploaded) {
+      // Stored files expired mid-campaign: upload them again once and retry.
+      job.reuploaded = true;
+      try { job.attachments = await prepareAttachments(null, true); ({ ok, data } = await post()); } catch {}
+    }
+    if (ok && data.ok) { recordLocal({ ...evt, ok: true, mid: data.id }); return { ok: true }; }
     const error = data.error || 'Sending failed.';
     if (!data.fatal) recordLocal({ ...evt, err: error });
     return { ok: false, error, fatal: !!data.fatal };
@@ -1187,7 +1296,7 @@ function recordLocal(evt) {
   if (S.local.length > 5000) S.local.length = 5000;
   store.set('vl_events', S.local);
   if (S.team.storage && S.team.loaded) S.team.events.unshift(evt);
-  updateQuota();
+  updateQuota(); updateFuBadge();
 }
 
 function renderProgress(first) {
@@ -1232,6 +1341,14 @@ function bindProgress() {
   $('pgDone').onclick = () => {
     const job = S.job; closeModal('progressModal');
     const ok = job ? job.items.filter(i => i.status === 'ok').length : 0;
+    if (job && job.root) {
+      exitFollowUp();
+      S.job = null;
+      if (ok) toast('ok', `Follow-up sent to ${ok}`, 'You’ll find it on the Follow-ups page.');
+      if (S.team.storage) loadTeam(true);
+      go('followups');
+      return;
+    }
     if (ok) {
       const sentSet = new Set(job.items.filter(i => i.status === 'ok').map(i => i.r.email));
       const left = job.items.filter(i => !sentSet.has(i.r.email)).length;
@@ -1250,6 +1367,198 @@ function bindProgress() {
 }
 
 // ═══════════════════════════════════════════════════════════════
+//  Replies & follow-ups
+// ═══════════════════════════════════════════════════════════════
+function mergeReplies(map) {
+  let changed = false;
+  Object.entries(map || {}).forEach(([k, v]) => { if (!S.replies[k]) { S.replies[k] = v; changed = true; } });
+  if (changed) store.set('vl_replies', S.replies);
+}
+function hasReplied(from, to) { return !!S.replies[`${from}|${to}`]; }
+function typeLabel(c) { return (TYPES[c.type] || 'Other') + (c.fu ? ` · follow-up ${c.fu}` : ''); }
+function sentPill(e) {
+  return S.replies[`${e.from}|${e.to}`] ? '<span class="pill pill-ok">Replied</span>' : '<span class="pill pill-muted">Sent</span>';
+}
+
+// Your campaigns from the last 60 days, with who replied and what's due.
+function myThreads() {
+  const me = (S.settings.email || '').toLowerCase();
+  if (!me) return [];
+  const since = Date.now() - 60 * 864e5;
+  const m = new Map();
+  allKnownEvents().filter(e => e.ok && e.from === me && e.t >= since && (e.cid || e.root)).slice().sort((a, b) => a.t - b.t).forEach(e => {
+    const id = e.root || e.cid;
+    let t = m.get(id);
+    if (!e.fu) {
+      if (!t) { t = { root: id, type: e.type, first: e.t, last: e.t, stage: 0, subject: e.subject, brands: new Map(), contacts: new Map() }; m.set(id, t); }
+      if (!t.contacts.has(e.to)) t.contacts.set(e.to, { email: e.to, name: e.toName || '', brand: e.brand || '', subject: e.subject, mid: e.mid || '', last: e.t });
+      if (e.brand) t.brands.set(e.brand.toLowerCase(), e.brand);
+      t.last = Math.max(t.last, e.t);
+    } else if (t) {
+      t.stage = Math.max(t.stage, e.fu); t.last = Math.max(t.last, e.t);
+      const c = t.contacts.get(e.to); if (c) c.last = e.t;
+    }
+  });
+  const now = Date.now();
+  const rank = { due: 0, wait: 1, done: 2, replied: 3 };
+  return [...m.values()].map(t => {
+    const contactList = [...t.contacts.values()];
+    const replied = contactList.filter(c => hasReplied(me, c.email));
+    const pending = contactList.filter(c => !hasReplied(me, c.email));
+    const days = (now - t.last) / 864e5;
+    const status = !pending.length ? 'replied' : t.stage >= FU_MAX ? 'done' : days >= FU_DUE_DAYS ? 'due' : 'wait';
+    return { ...t, contactList, replied, pending, days, status };
+  }).sort((a, b) => rank[a.status] - rank[b.status] || b.last - a.last);
+}
+
+function updateFuBadge() {
+  const n = myThreads().filter(t => t.status === 'due').length;
+  $('fuBadge').hidden = !n; $('fuBadge').textContent = n;
+}
+
+function renderFollowups() {
+  if ($('page-followups').hidden) return;
+  $('replyStatus').textContent = S.lastReplyCheck ? `Replies checked ${timeAgo(S.lastReplyCheck)}` : '';
+  const body = $('fuBody');
+  if (!S.settings.email || !S.settings.pass) { body.innerHTML = `<tr class="table-empty"><td colspan="7">Connect your Gmail in Settings to see your follow-ups.</td></tr>`; return; }
+  const list = myThreads();
+  if (!list.length) { body.innerHTML = `<tr class="table-empty"><td colspan="7">No campaigns from you in the last 60 days. Send one and it will show up here, ready to follow up.</td></tr>`; return; }
+  body.innerHTML = list.map(t => {
+    const b = [...t.brands.values()];
+    const brand = b.length ? b[0] + (b.length > 1 ? ` +${b.length - 1}` : '') : 'Campaign';
+    const n = t.contactList.length, r = t.replied.length;
+    const dots = Array.from({ length: FU_MAX }, (_, i) => `<i class="${i < t.stage ? 'on' : ''}"></i>`).join('');
+    const wait = Math.max(1, Math.ceil(FU_DUE_DAYS - t.days));
+    const pill = {
+      due: '<span class="pill pill-warn">Due now</span>',
+      wait: `<span class="pill pill-muted">In ${wait} day${wait > 1 ? 's' : ''}</span>`,
+      replied: '<span class="pill pill-ok">Everyone replied</span>',
+      done: '<span class="pill pill-muted">Done</span>',
+    }[t.status];
+    const action = t.status === 'due'
+      ? `<button class="btn btn-primary btn-sm" data-fu="${esc(t.root)}" type="button">Follow up (${t.pending.length})</button>`
+      : t.status === 'wait' ? `<button class="btn btn-outline btn-sm" data-fu="${esc(t.root)}" type="button">Follow up early</button>` : '';
+    return `<tr>
+      <td><span class="td-strong">${esc(brand)}</span><span class="td-sub td-clip" title="${esc(t.subject)}">${esc(t.subject || '')}</span></td>
+      <td class="td-when" data-label="First sent">${esc(fmtDate(t.first))}<span class="td-sub">${esc(timeAgo(t.first))}</span></td>
+      <td class="t-num" data-label="Contacts">${n}</td>
+      <td class="t-num" data-label="Replied"><span class="reply-bar">${r}<span class="meter"><span style="width:${n ? r / n * 100 : 0}%"></span></span></span></td>
+      <td data-label="Follow-ups"><span class="dots">${dots}<em>${t.stage} of ${FU_MAX}</em></span></td>
+      <td>${pill}</td>
+      <td class="t-right">${action}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function checkReplies(contacts, since) {
+  const me = S.settings.email.toLowerCase();
+  const todo = [...new Set(contacts)].filter(c => !hasReplied(me, c));
+  let found = 0;
+  for (let i = 0; i < todo.length; i += 150) {
+    const { ok, data } = await api('/api/replies', { method: 'POST', body: { auth: { user: me, pass: S.settings.pass }, contacts: todo.slice(i, i + 150), since } });
+    if (!ok) throw new Error(data.error || 'Could not check replies.');
+    (data.replied || []).forEach(to => { const k = `${me}|${to}`; if (!S.replies[k]) { S.replies[k] = Date.now(); found++; } });
+  }
+  store.set('vl_replies', S.replies);
+  S.lastReplyCheck = Date.now(); store.set('vl_reply_check', S.lastReplyCheck);
+  return found;
+}
+
+let replyChecking = false;
+async function checkAllReplies(silent) {
+  if (replyChecking || !S.settings.email || !S.settings.pass) {
+    if (!silent && !S.settings.pass) { toast('bad', 'Connect your Gmail first'); go('settings'); }
+    return;
+  }
+  const threads = myThreads().filter(t => t.pending.length && Date.now() - t.first < 45 * 864e5);
+  const contacts = threads.flatMap(t => t.pending.map(c => c.email));
+  if (!contacts.length) { if (!silent) toast('info', 'Nothing to check', 'No recent campaigns are waiting on replies.'); return; }
+  replyChecking = true;
+  const btn = $('checkRepliesBtn'); btn.disabled = true;
+  $('replyStatus').textContent = 'Checking your Gmail…';
+  try {
+    const found = await checkReplies(contacts, Math.min(...threads.map(t => t.first)));
+    if (!silent) toast(found ? 'ok' : 'info', found ? `${found} new ${found === 1 ? 'reply' : 'replies'} found` : 'No new replies yet', found ? 'They’re left out of follow-ups automatically.' : `Checked ${contacts.length} contacts.`);
+  } catch (e) {
+    if (!silent && !e.access) toast('bad', 'Couldn’t check replies', e.message);
+  } finally {
+    replyChecking = false; btn.disabled = false;
+    renderFollowups(); updateFuBadge(); renderTeam(); renderLog();
+  }
+}
+function autoCheckReplies() {
+  if (S.settings.email && S.settings.pass && Date.now() - S.lastReplyCheck > 15 * 60e3) checkAllReplies(true);
+}
+
+async function startFollowUp(root) {
+  if (S.job && S.job.running) return;
+  if (!S.settings.email || !S.settings.pass) { toast('bad', 'Connect your Gmail first'); go('settings'); return; }
+  let t = myThreads().find(x => x.root === root);
+  if (!t) return toast('bad', 'Couldn’t find that campaign');
+  if (t.stage >= FU_MAX) return toast('info', 'Two follow-ups already sent', 'It’s best to move on from this one.');
+  toast('info', 'Checking your Gmail for replies…');
+  let replyErr = false;
+  try { await checkReplies(t.contactList.map(c => c.email), t.first); } catch (e) { replyErr = !e.access; }
+  t = myThreads().find(x => x.root === root);
+  if (!t.pending.length) { toast('ok', 'Everyone has replied', 'No follow-up needed.'); renderFollowups(); updateFuBadge(); return; }
+
+  if (S.fu) exitFollowUp();
+  saveDraft();
+  const prev = { draft: store.get('vl_draft', null), files: S.files.slice() };
+  const stage = t.stage + 1;
+  const tplIdx = stage >= 2 ? 1 : 0;
+  const tpl = TEMPLATES.followup[tplIdx];
+  S.fu = {
+    root, stage, type: t.type || 'custom', threaded: true, title: t.subject, first: t.first,
+    contacts: new Map(t.pending.map(c => [c.email, c])), repliedSkipped: t.replied.length, altSubject: tpl.subject, prev,
+  };
+  $('recipientsInput').value = ['email,name,brand'].concat(t.pending.map(c => [c.email, c.name, c.brand].map(csvSoft).join(','))).join('\n');
+  S.files = [];
+  $('brand').value = t.brands.size === 1 ? [...t.brands.values()][0] : '';
+  $('editor').innerHTML = sanitize(tpl.body);
+  S.activeTpl = 'b:followup:' + tplIdx;
+  $('subject').value = reSubject(t.pending[0].subject);
+  S.excluded.clear();
+  applyFuUI();
+  parseAndRender(true); renderAttachments(); renderTemplates(); renderTips(); updateSubjectCount(); updateReadiness();
+  go('compose');
+  if (replyErr) toast('bad', 'Couldn’t check for replies', 'Review the list and remove anyone who already answered.');
+  else toast('info', `Follow-up ${stage} is ready`, `${t.pending.length} ${t.pending.length === 1 ? 'person hasn’t' : 'people haven’t'} replied${t.replied.length ? `, and ${t.replied.length} who did ${t.replied.length === 1 ? 'is' : 'are'} left out` : ''}. Edit the message, then send.`);
+}
+
+function applyFuUI() {
+  const on = !!S.fu, threaded = on && S.fu.threaded;
+  $('fuBanner').hidden = !on;
+  $('recipientsInput').readOnly = on;
+  $('csvBtn').disabled = on;
+  $('subject').disabled = threaded;
+  $('subjHint').hidden = !threaded;
+  $('newDraftBtn').hidden = on;
+  $('h-compose').textContent = on ? 'Follow-up' : 'New campaign';
+  $('composeSub').textContent = on ? 'Goes only to people who haven’t replied yet. Keep it short, and give them one easy reason to answer.' : 'Write one pitch, and every contact gets their own personal copy from your Gmail.';
+  $('recActions').hidden = on;
+  $('recNote').textContent = on ? 'Everyone from the first email who hasn’t replied. Use × to leave someone out.' : 'Paste emails, paste rows from Google Sheets or Excel, or upload a CSV.';
+  if (on) {
+    $('fuStep').textContent = `Follow-up ${S.fu.stage} of ${FU_MAX}`;
+    $('fuTitle').textContent = `“${S.fu.title}”`;
+    $('fuMeta').textContent = `First sent ${timeAgo(S.fu.first)}`;
+    $('fuThreaded').checked = S.fu.threaded;
+  }
+}
+
+function exitFollowUp() {
+  if (!S.fu) return;
+  const prev = S.fu.prev;
+  S.fu = null;
+  applyFuUI();
+  if (prev && prev.draft) { store.set('vl_draft', prev.draft); restoreDraft(); }
+  else { $('recipientsInput').value = ''; $('subject').value = ''; $('editor').innerHTML = ''; }
+  S.files = prev ? prev.files : [];
+  S.activeTpl = null; S.excluded.clear();
+  parseAndRender(); renderAttachments(); renderTemplates(); renderTips(); updateSubjectCount(); updateReadiness();
+}
+
+// ═══════════════════════════════════════════════════════════════
 //  Team dashboard
 // ═══════════════════════════════════════════════════════════════
 function bindTeam() {
@@ -1262,6 +1571,8 @@ function bindTeam() {
   $('personFilter').onchange = e => { S.person = e.target.value; renderTeam(); };
   $('refreshBtn').onclick = async () => { $('refreshBtn').disabled = true; await loadTeam(true); $('refreshBtn').disabled = false; toast('info', 'Up to date'); };
   $('campSearch').addEventListener('input', renderCampaigns);
+  $('checkRepliesBtn').onclick = () => checkAllReplies(false);
+  $('fuBody').addEventListener('click', e => { const b = e.target.closest('[data-fu]'); if (b) startFollowUp(b.dataset.fu); });
   $('exportBtn').onclick = exportCsv;
   $('campBody').addEventListener('click', e => { const tr = e.target.closest('[data-cid]'); if (tr) openCampaign(tr.dataset.cid); });
   $('campBody').addEventListener('keydown', e => { if (e.key === 'Enter') { const tr = e.target.closest('[data-cid]'); if (tr) openCampaign(tr.dataset.cid); } });
@@ -1305,9 +1616,10 @@ function renderTeam() {
   $('kCampFoot').textContent = S.person ? '' : `${senders.size} ${senders.size === 1 ? 'teammate' : 'teammates'} sending`;
   $('kBrands').textContent = brandCount.length.toLocaleString('en-IN');
   $('kBrandsFoot').textContent = brandCount.length ? `Most pitched: ${brandCount[0].label}` : '';
-  const total = ok.length + fail.length;
-  $('kRate').textContent = total ? Math.round(ok.length / total * 100) + '%' : '—';
-  $('kRateFoot').textContent = total ? (fail.length ? `${fail.length} failed` : 'No failures') : '';
+  const pairs = new Set(ok.map(e => e.from + '|' + e.to));
+  const repliedPairs = [...pairs].filter(k => S.replies[k]).length;
+  $('kRate').textContent = pairs.size ? Math.round(repliedPairs / pairs.size * 100) + '%' : '—';
+  $('kRateFoot').textContent = pairs.size ? `${repliedPairs} of ${pairs.size} contacts replied${fail.length ? ` · ${fail.length} failed` : ''}` : '';
 
   renderChart(usingTeam);
   renderTypeBars(ok);
@@ -1385,20 +1697,20 @@ function renderPeople() {
   const m = new Map();
   events().forEach(e => {
     let p = m.get(e.from);
-    if (!p) { p = { from: e.from, name: e.fromName || '', acct: e.acct || 'gmail', today: 0, period: 0, camps: new Set(), brands: new Set(), failed: 0, last: 0, total: 0 }; m.set(e.from, p); }
+    if (!p) { p = { from: e.from, name: e.fromName || '', acct: e.acct || 'gmail', today: 0, period: 0, camps: new Set(), brands: new Set(), pairs: new Set(), failed: 0, last: 0, total: 0 }; m.set(e.from, p); }
     if (!p.name && e.fromName) p.name = e.fromName;
     if (e.t > p.last && e.ok) { p.last = e.t; if (e.acct) p.acct = e.acct; }
     if (e.ok) p.total++;
     if (e.ok && e.t >= today) p.today++;
     if (e.t >= since) {
-      if (e.ok) { p.period++; p.camps.add(e.cid); if (e.brand) p.brands.add(e.brand.toLowerCase()); }
+      if (e.ok) { p.period++; p.camps.add(e.cid); p.pairs.add(e.to); if (e.brand) p.brands.add(e.brand.toLowerCase()); }
       else p.failed++;
     }
   });
   let rows = [...m.values()];
   if (S.person) rows = rows.filter(r => r.from === S.person);
   rows.sort((a, b) => b.period - a.period || b.last - a.last);
-  if (!rows.length) { $('peopleBody').innerHTML = `<tr class="table-empty"><td colspan="8">No one has sent anything yet. The first campaign will show up here.</td></tr>`; return; }
+  if (!rows.length) { $('peopleBody').innerHTML = `<tr class="table-empty"><td colspan="9">No one has sent anything yet. The first campaign will show up here.</td></tr>`; return; }
   $('peopleBody').innerHTML = rows.map(p => {
     const lim = dailyLimit(p.acct); const pct = Math.min(100, p.today / lim * 100);
     return `<tr>
@@ -1407,6 +1719,7 @@ function renderPeople() {
       <td class="t-num td-strong">${p.period.toLocaleString('en-IN')}</td>
       <td class="t-num">${p.camps.size}</td>
       <td class="t-num">${p.brands.size}</td>
+      <td class="t-num">${[...p.pairs].filter(to => S.replies[p.from + '|' + to]).length}</td>
       <td class="t-num">${p.failed ? `<span style="color:var(--bad)">${p.failed}</span>` : '0'}</td>
       <td><div class="limit"><div class="meter${pct >= 90 ? ' bad' : pct >= 70 ? ' warn' : ''}"><span style="width:${pct}%"></span></div><span>${p.today} / ${lim}</span></div></td>
       <td class="td-when">${p.last ? esc(timeAgo(p.last)) : '—'}</td>
@@ -1419,7 +1732,7 @@ function campaigns() {
   filtered().slice().sort((a, b) => a.t - b.t).forEach(e => {
     const id = e.cid || ('x' + e.t);
     let c = m.get(id);
-    if (!c) { c = { cid: id, from: e.from, fromName: e.fromName, type: e.type, subject: e.subject, brands: new Map(), sent: 0, failed: 0, first: e.t, last: e.t, att: e.att || 0, rows: [] }; m.set(id, c); }
+    if (!c) { c = { cid: id, root: e.root || id, fu: e.fu || 0, from: e.from, fromName: e.fromName, type: e.type, subject: e.subject, brands: new Map(), sent: 0, failed: 0, first: e.t, last: e.t, att: e.att || 0, rows: [] }; m.set(id, c); }
     if (e.ok) c.sent++; else c.failed++;
     if (e.brand) c.brands.set(e.brand.toLowerCase(), e.brand);
     c.first = Math.min(c.first, e.t); c.last = Math.max(c.last, e.t);
@@ -1439,7 +1752,7 @@ function renderCampaigns() {
   $('campBody').innerHTML = list.slice(0, 200).map(c => `<tr data-cid="${esc(c.cid)}" tabindex="0">
     <td class="td-strong">${esc(brandLabel(c))}</td>
     <td class="td-clip" title="${esc(c.subject)}">${esc(c.subject || '—')}</td>
-    <td><span class="type-tag">${esc(TYPES[c.type] || 'Other')}</span></td>
+    <td><span class="type-tag">${esc(typeLabel(c))}</span></td>
     <td>${esc(c.fromName || c.from)}</td>
     <td class="t-num">${c.sent}</td>
     <td class="t-num">${c.failed ? `<span style="color:var(--bad)">${c.failed}</span>` : '0'}</td>
@@ -1453,7 +1766,7 @@ function openCampaign(cid) {
   $('cmBody').innerHTML = `
     <div class="cm-meta">
       <div>Sent by<strong>${esc(c.fromName || c.from)}</strong></div>
-      <div>Type<strong>${esc(TYPES[c.type] || 'Other')}</strong></div>
+      <div>Type<strong>${esc(typeLabel(c))}</strong></div>
       <div>Delivered<strong>${c.sent} of ${c.sent + c.failed}</strong></div>
       <div>When<strong>${esc(fmtDate(c.first))}</strong></div>
     </div>
@@ -1461,23 +1774,12 @@ function openCampaign(cid) {
     <table class="table"><thead><tr><th>To</th><th>Brand</th><th>Time</th><th>Status</th></tr></thead><tbody>
     ${rows.map(e => `<tr><td>${e.toName ? `<span class="td-strong">${esc(e.toName)}</span><span class="td-sub">${esc(e.to)}</span>` : esc(e.to)}</td><td>${esc(e.brand || '—')}</td>
       <td class="td-when">${esc(new Date(e.t).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }))}</td>
-      <td>${e.ok ? '<span class="pill pill-ok">Sent</span>' : `<span class="pill pill-bad" title="${esc(e.err || '')}">Failed</span>`}</td></tr>`).join('')}
+      <td>${e.ok ? sentPill(e) : `<span class="pill pill-bad" title="${esc(e.err || '')}">Failed</span>`}</td></tr>`).join('')}
     </tbody></table>`;
-  $('cmFollow').onclick = () => {
-    const sent = rows.filter(e => e.ok);
-    const lines = ['email,name,brand'].concat(sent.map(e => [e.to, e.toName || '', e.brand || ''].map(csvCell).join(',')));
-    $('recipientsInput').value = lines.join('\n');
-    $('ctype').value = 'followup';
-    $('brand').value = sent[0] && sent[0].brand && c.brands.size === 1 ? sent[0].brand : '';
-    S.activeTpl = null;
-    const t = TEMPLATES.followup[0];
-    $('subject').value = t.subject; $('editor').innerHTML = sanitize(t.body); S.activeTpl = 'b:followup:0';
-    S.files = []; renderAttachments();
-    closeModal('campModal');
-    parseAndRender(); renderTemplates(); renderTips(); updateSubjectCount(); saveDraft(); updateReadiness();
-    go('compose');
-    toast('info', 'Follow-up ready', `${sent.length} contacts loaded with a follow-up template.`);
-  };
+  const me = (S.settings.email || '').toLowerCase();
+  const th = c.from === me ? myThreads().find(t => t.root === c.root) : null;
+  $('cmFollow').hidden = !(th && th.stage < FU_MAX && th.pending.length);
+  $('cmFollow').onclick = () => { closeModal('campModal'); startFollowUp(c.root); };
   openModal('campModal');
 }
 
@@ -1516,7 +1818,7 @@ function renderLog() {
     <td>${esc(e.brand || '—')}</td>
     <td class="td-clip" title="${esc(e.subject)}">${esc(e.subject || '')}</td>
     <td>${esc(e.fromName || e.from)}</td>
-    <td>${e.ok ? '<span class="pill pill-ok">Sent</span>' : `<span class="pill pill-bad" title="${esc(e.err || '')}">Failed</span>`}</td></tr>`).join('');
+    <td>${e.ok ? sentPill(e) : `<span class="pill pill-bad" title="${esc(e.err || '')}">Failed</span>`}</td></tr>`).join('');
   const scope = S.team.storage && S.team.loaded ? 'whole team' : 'this browser only';
   $('logFoot').innerHTML = `<span>Showing ${shown.length.toLocaleString('en-IN')} of ${ev.length.toLocaleString('en-IN')} · ${scope}${S.team.capped ? ' · latest 8,000 emails' : ''}</span>` +
     (ev.length > shown.length ? `<button class="btn btn-outline btn-sm" data-more type="button">Show more</button>` : '');
@@ -1680,6 +1982,7 @@ function timeAgo(t) {
   const d = Math.floor(h / 24); if (d < 30) return `${d} day${d > 1 ? 's' : ''} ago`;
   return new Date(t).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
 }
+function csvSoft(v) { v = String(v ?? ''); return /[",\n]/.test(v) ? csvCell(v) : v; }
 function csvCell(v) { return `"${String(v ?? '').replace(/"/g, '""')}"`; }
 function downloadFile(name, content, type) {
   const blob = new Blob([content], { type });

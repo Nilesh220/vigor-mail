@@ -3,10 +3,41 @@
 // live progress bar, and lets the sender pause or stop mid-campaign.
 
 const nodemailer = require('nodemailer');
-const { logEvent, checkAccess, sameOriginOnly } = require('./_lib');
+const { logEvent, checkAccess, sameOriginOnly, redis, storeConfig } = require('./_lib');
 
 const EMAIL_RE = /^[^\s@<>()",;]+@[^\s@<>()",;]+\.[^\s@<>()",;]{2,}$/;
-const MAX_ATTACH_BYTES = 3.2 * 1024 * 1024; // Vercel request limit is 4.5 MB incl. base64 overhead
+const MAX_INLINE_BYTES = 3.2 * 1024 * 1024;  // sent inside the request (no team storage)
+const MAX_TOTAL_BYTES = 15.5 * 1024 * 1024;  // via team storage; Gmail's own cap is 25 MB after encoding
+const MSGID_RE = /^<[^<>\s]{1,200}@[^<>\s]{1,200}>$/;
+
+// Attachments kept in memory between sends on the same server, so a 100-person
+// campaign doesn't re-download the same deck 100 times.
+const fileCache = new Map();
+let cacheBytes = 0;
+async function loadStoredFile(id) {
+  if (fileCache.has(id)) return fileCache.get(id);
+  const metaOut = await redis([['GET', `vl:f:${id}:meta`]]);
+  const raw = metaOut && metaOut[0] && metaOut[0].result;
+  if (!raw) { const e = new Error('missing'); e.missing = true; throw e; }
+  const meta = JSON.parse(raw);
+  const parts = [];
+  for (let i = 0; i < meta.total; i += 2) {
+    const cmds = [['GET', `vl:f:${id}:${i}`]];
+    if (i + 1 < meta.total) cmds.push(['GET', `vl:f:${id}:${i + 1}`]);
+    const out = await redis(cmds);
+    for (const r of out) {
+      if (!r.result) { const e = new Error('missing'); e.missing = true; throw e; }
+      parts.push(Buffer.from(r.result, 'base64'));
+    }
+  }
+  const file = { meta, content: Buffer.concat(parts) };
+  fileCache.set(id, file); cacheBytes += file.content.length;
+  while (cacheBytes > 80 * 1024 * 1024 && fileCache.size > 1) {
+    const [k, v] = fileCache.entries().next().value;
+    fileCache.delete(k); cacheBytes -= v.content.length;
+  }
+  return file;
+}
 
 module.exports = async (req, res) => {
   sameOriginOnly(res);
@@ -24,15 +55,29 @@ module.exports = async (req, res) => {
   if (!EMAIL_RE.test(String(to.email || ''))) return res.status(400).json({ code: 'BAD_RECIPIENT', error: 'This email address is not valid.' });
   if (!b.subject || !b.html) return res.status(400).json({ code: 'EMPTY', error: 'Subject and message are required.' });
 
-  // Attachments
+  // Attachments: either stored in team storage ({ ref }) or sent inline ({ data })
   let attachments = [];
   if (Array.isArray(b.attachments) && b.attachments.length) {
-    let total = 0;
-    attachments = b.attachments.map(a => {
-      total += Math.floor(String(a.data || '').length * 0.75);
-      return { filename: String(a.name || 'attachment'), content: String(a.data || ''), encoding: 'base64', contentType: a.type || undefined };
-    });
-    if (total > MAX_ATTACH_BYTES) return res.status(413).json({ code: 'TOO_LARGE', error: 'Attachments are over 3 MB. Share large decks as a Google Drive link instead.' });
+    let inline = 0, total = 0;
+    try {
+      for (const a of b.attachments.slice(0, 20)) {
+        if (a.ref) {
+          if (!storeConfig() || !/^[a-f0-9]{24,64}$/.test(String(a.ref))) throw Object.assign(new Error('missing'), { missing: true });
+          const f = await loadStoredFile(String(a.ref));
+          total += f.content.length;
+          attachments.push({ filename: String(a.name || f.meta.name), content: f.content, contentType: a.type || f.meta.type });
+        } else {
+          const n = Math.floor(String(a.data || '').length * 0.75);
+          inline += n; total += n;
+          attachments.push({ filename: String(a.name || 'attachment'), content: String(a.data || ''), encoding: 'base64', contentType: a.type || undefined });
+        }
+      }
+    } catch (e) {
+      if (e.missing) return res.status(410).json({ ok: false, code: 'ATT_MISSING', fatal: true, error: 'The attachments expired from storage. Remove and add them again.' });
+      return res.status(502).json({ ok: false, code: 'ATT_ERROR', error: 'Could not load the attachments. Try again.' });
+    }
+    if (inline > MAX_INLINE_BYTES) return res.status(413).json({ code: 'TOO_LARGE', fatal: true, error: 'Attachments are over 3 MB. Turn on team storage to send up to 15 MB, or share a Google Drive link.' });
+    if (total > MAX_TOTAL_BYTES) return res.status(413).json({ code: 'TOO_LARGE', fatal: true, error: 'Attachments are over 15 MB in total. Share large files as a Google Drive link.' });
   }
 
   const senderName = clean(auth.name);
@@ -55,6 +100,11 @@ module.exports = async (req, res) => {
     attachments,
   };
   if (b.replyTo && EMAIL_RE.test(b.replyTo)) mail.replyTo = b.replyTo;
+  // Follow-ups: thread the email under the original message in the recipient's inbox
+  if (b.inReplyTo && MSGID_RE.test(String(b.inReplyTo))) {
+    mail.inReplyTo = String(b.inReplyTo);
+    mail.references = [String(b.inReplyTo)];
+  }
 
   const transporter = nodemailer.createTransport({
     host: 'smtp.gmail.com',
@@ -78,12 +128,14 @@ module.exports = async (req, res) => {
     subject: mail.subject,
     att: attachments.length,
     acct: meta.acct === 'workspace' ? 'workspace' : 'gmail',
+    root: clean(meta.root) || undefined,
+    fu: Number(meta.fu) > 0 ? Number(meta.fu) : undefined,
     ok: true,
   };
 
   try {
     const info = await transporter.sendMail(mail);
-    if (!b.test) await logEvent(evt);
+    if (!b.test) await logEvent({ ...evt, mid: info.messageId });
     return res.status(200).json({ ok: true, id: info.messageId });
   } catch (err) {
     const friendly = explain(err);

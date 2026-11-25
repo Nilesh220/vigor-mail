@@ -26,6 +26,7 @@ async function redis(commands) {
 }
 
 const EVENTS_KEY = 'vl:events';
+const REPLIES_KEY = 'vl:replies';
 const MAX_EVENTS = 25000;
 
 async function logEvent(evt) {
@@ -61,4 +62,4 @@ function sameOriginOnly(res) {
   res.setHeader('X-Content-Type-Options', 'nosniff');
 }
 
-module.exports = { storeConfig, redis, logEvent, checkAccess, sameOriginOnly, EVENTS_KEY };
+module.exports = { storeConfig, redis, logEvent, checkAccess, sameOriginOnly, EVENTS_KEY, REPLIES_KEY };

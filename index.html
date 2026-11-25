@@ -28,6 +28,11 @@
       <svg viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/></svg>
       New campaign
     </a>
+    <a href="#followups" data-page="followups" class="nav-link">
+      <svg viewBox="0 0 24 24"><path d="M9 14L4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>
+      Follow-ups
+      <span class="nav-badge" id="fuBadge" hidden>0</span>
+    </a>
     <a href="#team" data-page="team" class="nav-link">
       <svg viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>
       Team activity
@@ -69,7 +74,7 @@
     <div class="page-head">
       <div>
         <h1 id="h-compose">New campaign</h1>
-        <p class="page-sub">Write one pitch, and every contact gets their own personal copy from your Gmail.</p>
+        <p class="page-sub" id="composeSub">Write one pitch, and every contact gets their own personal copy from your Gmail.</p>
       </div>
       <div class="page-head-actions">
         <button class="btn btn-quiet" id="newDraftBtn" type="button">Start over</button>
@@ -82,6 +87,19 @@
         You need a Gmail App Password. It takes about two minutes, and we’ll walk you through it.
       </div>
       <button class="btn btn-primary btn-sm" type="button" data-goto="settings">Set up Gmail</button>
+    </div>
+
+    <div class="fu-banner" id="fuBanner" hidden>
+      <div class="fu-banner-main">
+        <span class="fu-step" id="fuStep">Follow-up 1 of 2</span>
+        <strong id="fuTitle"></strong>
+        <span class="fu-meta" id="fuMeta"></span>
+      </div>
+      <label class="check fu-thread">
+        <input type="checkbox" id="fuThreaded" checked />
+        <span>Send as a reply in the same email thread <span class="check-hint">(recommended)</span></span>
+      </label>
+      <button class="btn btn-quiet btn-sm fu-cancel" type="button" id="fuCancel">Cancel follow-up</button>
     </div>
 
     <div class="compose">
@@ -125,9 +143,9 @@
           <div class="sec-head sec-head-row">
             <div>
               <h2>Recipients</h2>
-              <p>Paste emails, paste rows from Google Sheets or Excel, or upload a CSV.</p>
+              <p id="recNote">Paste emails, paste rows from Google Sheets or Excel, or upload a CSV.</p>
             </div>
-            <div class="sec-actions">
+            <div class="sec-actions" id="recActions">
               <button class="btn btn-quiet btn-sm" type="button" id="sampleCsvBtn">Download sample sheet</button>
               <button class="btn btn-outline btn-sm" type="button" id="csvBtn">Upload CSV</button>
               <input type="file" id="csvFile" accept=".csv,.txt,.tsv" hidden />
@@ -156,6 +174,7 @@
           <label class="field">
             <span class="field-label field-label-row">Subject <span class="counter" id="subjCount">0 / 60</span></span>
             <input class="input" id="subject" placeholder="Campus activations for {{brand}} this season" autocomplete="off" />
+            <span class="field-hint" id="subjHint" hidden>Each person gets “Re:” plus the subject of the email they received, so this lands in the same thread.</span>
           </label>
 
           <div class="field">
@@ -203,11 +222,11 @@
         <section class="sec">
           <div class="sec-head">
             <h2>Attachments <span class="optional">optional</span></h2>
-            <p>Decks, rate cards or case studies. They go with every email.</p>
+            <p id="attNote">Add as many files as you need: decks, rate cards, case studies. They go with every email.</p>
           </div>
           <div class="drop" id="drop" tabindex="0" role="button" aria-label="Add attachments">
             <svg viewBox="0 0 24 24"><path d="M21 12.5l-8.5 8.5a6 6 0 0 1-8.5-8.5L12.5 4a4 4 0 0 1 5.7 5.7L9.7 18.2a2 2 0 0 1-2.8-2.8L15 7.3"/></svg>
-            <span><strong>Drop files here</strong> or click to choose. PDF, PPT, Word, images</span>
+            <span><strong>Drop one or more files here</strong> or click to choose. PDF, PowerPoint, Word, Excel, images</span>
             <input type="file" id="attFile" multiple hidden />
           </div>
           <div class="att-list" id="attList"></div>
@@ -262,6 +281,38 @@
     </div>
   </section>
 
+  <!-- ─────────── FOLLOW-UPS ─────────── -->
+  <section class="page" id="page-followups" aria-labelledby="h-fu" hidden>
+    <div class="page-head">
+      <div>
+        <h1 id="h-fu">Follow-ups</h1>
+        <p class="page-sub">Your campaigns that are still waiting on replies. Follow up after 3–5 days, and stop after two.</p>
+      </div>
+      <div class="page-head-actions">
+        <span class="inline-status" id="replyStatus"></span>
+        <button class="btn btn-outline" type="button" id="checkRepliesBtn">
+          <svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></svg>
+          Check for replies
+        </button>
+      </div>
+    </div>
+
+    <div class="fu-how">
+      <div><strong>Same thread</strong><span>Follow-ups go out as a reply to your first email, so the contact sees the whole conversation.</span></div>
+      <div><strong>Skips replies</strong><span>We check your Gmail before sending, so nobody who already answered gets chased.</span></div>
+      <div><strong>Two at most</strong><span>After two follow-ups the campaign is marked done. More than that hurts your sender reputation.</span></div>
+    </div>
+
+    <div class="block block-flush">
+      <div class="table-scroll">
+        <table class="table fu-table">
+          <thead><tr><th>Campaign</th><th>First sent</th><th class="t-num">Contacts</th><th class="t-num">Replied</th><th>Follow-ups</th><th>Next step</th><th></th></tr></thead>
+          <tbody id="fuBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
   <!-- ─────────── TEAM ─────────── -->
   <section class="page" id="page-team" aria-labelledby="h-team" hidden>
     <div class="page-head">
@@ -296,7 +347,7 @@
       <div class="kpi"><span class="kpi-label">Emails sent</span><span class="kpi-num" id="kSent">0</span><span class="kpi-foot" id="kSentFoot"></span></div>
       <div class="kpi"><span class="kpi-label">Campaigns</span><span class="kpi-num" id="kCamp">0</span><span class="kpi-foot" id="kCampFoot"></span></div>
       <div class="kpi"><span class="kpi-label">Brands pitched</span><span class="kpi-num" id="kBrands">0</span><span class="kpi-foot" id="kBrandsFoot"></span></div>
-      <div class="kpi"><span class="kpi-label">Accepted by Gmail</span><span class="kpi-num" id="kRate">—</span><span class="kpi-foot" id="kRateFoot"></span></div>
+      <div class="kpi"><span class="kpi-label">Reply rate</span><span class="kpi-num" id="kRate">—</span><span class="kpi-foot" id="kRateFoot"></span></div>
     </div>
 
     <div class="team-grid">
@@ -316,7 +367,7 @@
         <table class="table">
           <thead><tr>
             <th>Teammate</th><th class="t-num">Today</th><th class="t-num">In period</th><th class="t-num">Campaigns</th>
-            <th class="t-num">Brands</th><th class="t-num">Failed</th><th>Daily limit used</th><th>Last sent</th>
+            <th class="t-num">Brands</th><th class="t-num">Replies</th><th class="t-num">Failed</th><th>Daily limit used</th><th>Last sent</th>
           </tr></thead>
           <tbody id="peopleBody"></tbody>
         </table>

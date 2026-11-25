@@ -44,9 +44,13 @@ Share the link with the team. Each person:
 
 Passwords are saved only in that person’s own browser.
 
-## 4. Turn on team tracking (recommended, free)
+## 4. Turn on team storage (recommended, free)
 
-Without this, the **Team activity** page only shows emails sent from that one browser. With it, you see every teammate in one place.
+This one switch unlocks three things:
+
+- **Team activity** shows every teammate in one place (without it, each person only sees their own browser).
+- **Attachments up to 15 MB** in total, with as many files as you like (without it, the limit is 3 MB).
+- **Reply rates** for everyone on the dashboard.
 
 1. In Vercel, open your project and click the **Storage** tab.
 2. Click **Create Database** (or **Browse Marketplace**), choose **Upstash**, then **Upstash for Redis**.
@@ -76,9 +80,21 @@ Each teammate enters the code once, and their browser remembers it.
 - **Use the Normal or Gentle pace** (in Settings). The dashboard spaces emails out randomly so they look hand-sent.
 - **Keep the “Inbox readiness” panel green** before you send.
 - **Send yourself a test first** with the **Send test to me** button.
-- **Share big decks as a Google Drive link.** Attachments are capped at 3 MB in total, and big attachments in cold emails often land in spam.
+- **Keep attachments light.** You can attach several files, up to 15 MB in total, but cold emails with big attachments are more likely to land in spam. For decks over about 5 MB, a Google Drive link is often the safer choice.
 - **Respect opt-outs.** Add anyone who asks not to be contacted to **Settings → Do-not-contact list**.
 - **On a company domain** (e.g. `@vigorlaunchpad.com` through Google Workspace), ask whoever manages it to switch on **DKIM** in the Google Admin console. It’s the single biggest boost to inbox placement.
+
+## Follow-ups
+
+Open **Follow-ups** in the menu. It lists your campaigns from the last 60 days:
+
+1. Click **Check for replies**. The dashboard looks in your Gmail (read-only, using the same App Password) to see who has written back.
+2. When a campaign shows **Due now** (3 days after the last email), click **Follow up**.
+3. The dashboard loads only the people who haven’t replied, with a short follow-up template. Edit it if you like, then send as usual.
+4. Each follow-up goes out as a **reply in the same email thread**, so the contact sees your original pitch underneath.
+5. After **two follow-ups**, the campaign is marked done.
+
+The yellow number next to **Follow-ups** in the menu tells you how many campaigns are due.
 
 ## Limits to know
 
@@ -86,7 +102,7 @@ Each teammate enters the code once, and their browser remembers it.
 |---|---|
 | Free Gmail | about 500 emails per person per day |
 | Google Workspace | about 2,000 emails per person per day |
-| Attachments | 3 MB total per email |
+| Attachments | any number of files: 15 MB total with team storage, 3 MB without |
 | While sending | keep the browser tab open (you can pause or stop at any time) |
 | Team history | the latest 25,000 emails are kept; the dashboard shows the latest 8,000 |
 
@@ -95,4 +111,6 @@ Each teammate enters the code once, and their browser remembers it.
 - **“Gmail did not accept the login”**: make sure 2-Step Verification is on, and paste the 16-letter App Password, not your normal password.
 - **App passwords option is missing**: on company Google accounts, your admin has to allow it.
 - **Team activity only shows my emails**: team tracking isn’t on yet (step 4), or the site wasn’t redeployed after connecting it.
+- **Attachments say “over 3 MB”**: team storage isn’t on yet (step 4).
+- **“Couldn’t check replies”**: usually a wrong App Password, or Gmail was busy. Try again in a minute.
 - **“Daily sending limit reached”**: Gmail’s cap for the day. It resets in about 24 hours.
